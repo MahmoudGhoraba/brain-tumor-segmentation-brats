@@ -1,0 +1,77 @@
+_meta_: {}
+bundle_root: /workspace/Model/segresnet_2
+ckpt_path: $@bundle_root + '/model'
+mlflow_tracking_uri: $@ckpt_path + '/mlruns/'
+mlflow_experiment_name: Auto3DSeg
+data_file_base_dir: /workspace/data/prep
+data_list_file_path: /workspace/Model/datalist.json
+modality: mri
+fold: 2
+input_channels: 4
+output_classes: 4
+class_names: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity]
+class_index:
+- [1, 2, 3]
+- [1, 3]
+- [3]
+- [4]
+debug: false
+ckpt_save: true
+cache_rate: 0
+roi_size: [128, 160, 128]
+auto_scale_allowed: true
+auto_scale_batch: true
+auto_scale_roi: false
+auto_scale_filters: false
+quick: false
+channels_last: true
+validate_final_original_res: true
+calc_val_loss: false
+amp: true
+log_output_file: null
+cache_class_indices: null
+early_stopping_fraction: 0.001
+determ: false
+orientation_ras: true
+crop_foreground: true
+learning_rate: 0.0002
+batch_size: 9
+num_images_per_batch: 1
+num_epochs: 490
+num_warmup_epochs: 3
+sigmoid: true
+resample: true
+resample_resolution: [1.0, 1.0, 1.0]
+crop_mode: ratio
+normalize_mode: meanstd
+intensity_bounds: [-1.1339423332875596, 1.4020717762410642]
+num_epochs_per_validation: 40
+num_epochs_per_saving: 1
+num_workers: 10
+num_steps_per_image: 1
+num_crops_per_image: 2
+loss: {_target_: DiceCELoss, include_background: true, squared_pred: true, smooth_nr: 0,
+  smooth_dr: 1.0e-05, softmax: $not @sigmoid, sigmoid: $@sigmoid, to_onehot_y: $not
+    @sigmoid}
+optimizer: {_target_: torch.optim.AdamW, lr: '@learning_rate', weight_decay: 1.0e-05}
+network:
+  _target_: SegResNetDS
+  init_filters: 32
+  blocks_down: [1, 2, 2, 4, 4]
+  norm: INSTANCE
+  in_channels: '@input_channels'
+  out_channels: '@output_classes'
+  dsdepth: 4
+finetune: {enabled: false, ckpt_name: $@bundle_root + '/model/model.pt'}
+validate: {enabled: false, ckpt_name: $@bundle_root + '/model/model.pt', output_path: $@bundle_root
+    + '/prediction_validation', save_mask: false, invert: true}
+infer: {enabled: false, ckpt_name: $@bundle_root + '/model/model.pt', output_path: $@bundle_root
+    + '/prediction_' + @infer#data_list_key, data_list_key: testing}
+anisotropic_scales: false
+spacing_median: [1.0, 1.0, 1.0]
+spacing_lower: [1.0, 1.0, 1.0]
+spacing_upper: [1.0, 1.0, 1.0]
+image_size_mm_median: [139.0, 175.0, 140.0]
+image_size_mm_90: [145.0, 182.0, 149.0]
+image_size: [145, 182, 149]
+pretrained_ckpt_name: null

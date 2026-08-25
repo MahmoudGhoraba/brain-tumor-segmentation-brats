@@ -1,0 +1,141 @@
+# FROZEN_TESTPHASE.yaml — single source of truth for the test-phase container's
+# inference + post-processing configuration.
+#
+# Produced by, and byte-verified against, submission 9774164 (Synapse evaluation
+# 9619537, "Task 1: Brain Metastases - Predictions"): entity syn76483490 version 2,
+# fileHandle contentMd5=33367a5e233cd24e5b3ed263cb8e7a9e, contentSize=2204774 bytes,
+# confirmed identical (whole-file MD5, not sampled) against the local build in
+# scripts/rc_floor_ordering_fix.py's "shipped" path
+# (/workspace/data/submission_staging_FIXED_shipped, packaged as
+# BraTS-MET-validation-5fold-tuned.zip). No parameter below is a default; every value
+# is the one actually scored.
+#
+# Explicitly NOT frozen: the max-seed=0.99/mean-flood=0.5/RC-floor=250mm3 variant
+# (submission 9774162). Measured identical TP_rc (0.0447 both) against double the
+# FP_rc (0.0335 vs 0.0168) relative to this config — strictly worse. Do not ship it.
+
+model:
+  architecture: SegResNetDS
+  framework: MONAI Auto3DSeg
+  checkpoints:
+    - Model/segresnet_0/model/model.pt
+    - Model/segresnet_1/model/model.pt
+    - Model/segresnet_2/model/model.pt
+    - Model/segresnet_3/model/model.pt
+    - Model/segresnet_4/model/model.pt
+  fold_count: 5
+  ensemble_fusion: mean            # plain arithmetic mean of sigmoid probabilities across all 5 folds
+  input_channels: [t1n, t1c, t2w, t2f]
+  output_channels: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity]
+  output_activation: sigmoid       # NOT softmax -- regions are nested (WT superset TC superset ET), not mutually exclusive
+  channel_order_assertion: assert_channel_order   # regions_to_labelmap.py -- refuses to run on a mismatched class_names order
+  roi_size: [128, 160, 128]
+
+region_thresholds:
+  et_threshold: 0.25
+  tc_threshold: 0.45
+  wt_threshold: 0.5
+  # RC has no flat threshold -- see rc_hysteresis below.
+
+min_volume_mm3:
+  wt: 15.0
+  tc: 15.0
+  et: 15.0
+  rc: 15.0                        # NOT the 250mm3 probe variant -- that config is rejected, see header
+
+rc_hysteresis:
+  method: skimage.filters.apply_hysteresis_threshold
+  seed_threshold: 0.97             # existence bar: some voxel must clear this for the component to exist at all
+  flood_threshold: 0.5             # extent bar: once it exists, recovered down to this
+  applied_on: mean_probability     # the 5-model MEAN, not per-model max -- see header re: 9774162 rejection
+  source_of_seed_value: |
+    Originally tuned to 0.99 on per-fold OOF probabilities (d5_rc_seed_check.log).
+    Corrected to 0.97 after measuring that seed=0.99 requires near-unanimous agreement
+    across the 5-model mean, which genuinely-unseen models rarely produce (peak
+    suppression: median max_of_mean/mean_of_max = 0.7145 on the real validation set vs
+    1.0000 on memorized cross-fold data; median cross-model peak-voxel disagreement
+    103mm -- rc_seed_agreement_inflation.log, rc_peak_suppression_validation.log).
+
+rc_pretreatment_hard_zero:
+  enabled: true
+  mechanism: site_proxy             # treatment_status.is_reliably_pretreatment(case_id)
+  logic: not is_ucsd(case_id)
+  effect_when_true: rc_threshold_forced_to_1.01   # unreachable -- hard zero, not a soft threshold
+  measured_recall_cost_on_oof: 0.0   # 0/151 GT-RC-positive OOF cases are hard-zeroed (phase1_rc_checks.log)
+  measured_cost_of_removal: -0.0853 cohort_rc_f1  # real, large; removal REJECTED -- siteproxy_testphase_risk.log
+  status: KEEP, with an open risk tracked, not silently assumed safe. Test-phase
+    institutional split (213/303 = 70.3% UCSD, wiki 639600) is documented; the
+    patient-ID-to-institution MAPPING for test-phase is not. RECOMMENDED (not yet
+    implemented): a fallback circuit-breaker -- if is_ucsd() flags a rate far from
+    ~70.3% on the real test set, switch to an image-only classifier gate (built and
+    tested this session, AUC=0.8689 with zero ID dependency, TPR=0.71/FPR=0.13 @
+    th=0.10 -- a real but non-dominant tradeoff against the proxy's TPR=1.0/FPR=0.43).
+    See siteproxy_testphase_risk.log for the full decision record.
+
+filters:
+  wt_no_et:
+    enabled: true
+    min_et_voxels: 20
+    note: drops a WT component with fewer than this many enclosed ET voxels, unless it overlaps a predicted RC component
+  rim_test:
+    enabled: true
+    dilation_iters: 1
+    containment_threshold: 0.5
+    note: drops an RC component mostly enclosed by a filled ET envelope (necrotic core, not cavity) -- C2 measured this catches only ~4.5% of RC FPs, kept anyway (cheap, small real contribution)
+  shape_reject: false               # measured net negative in the D5 sweep, off
+  enhancement_contrast: false       # measured monotonically harmful, off
+  watershed_split: false            # measured zero TP recovery (any-overlap matcher), off in shipping
+  tta: false                        # measured -0.0026 composite (inside noise floor, but decided against), off
+
+pipeline_order:
+  # Order is deliberate and specific -- see regions_to_labelmap.py combine_region_masks docstring.
+  1: "threshold WT/TC/ET at their flat thresholds; RC via hysteresis (seed=0.97, flood=0.5), or hard-zeroed if is_reliably_pretreatment"
+  2: "wt_no_et_filter(wt_mask, et_mask, min_et_voxels=20, rc_mask=rc_mask)"
+  3: "rim_test_filter(rc_mask, et_mask)"
+  4: "filter_components(*, min_volume_mm3) per region -- FIRST PASS (pre-conflict-resolution)"
+  5: "combine_region_masks(wt, tc, et, rc, rc_conflict='higher_prob') -- enforces tc |= et; wt |= tc, THEN resolves RC-vs-WT conflicts by comparing raw probabilities (RC wins iff rc_p > wt_p at a conflicting voxel)"
+  6: "filter_components(*, min_volume_mm3) per region on the TRUE FINAL post-combination extent -- SECOND PASS, THE ORDERING FIX (rc_floor_ordering_fix.log)"
+  7: "brain masking (zero everything outside t1c != 0)"
+
+ordering_fix:
+  description: |
+    Step 4 (the pre-fix single-pass floor) can pass a component, then step 5's conflict
+    resolution can shrink that same component below the floor it already cleared, on
+    ANY of the four channels (RC loses to tumor, or WT/TC/ET lose to RC). Step 6 is a
+    second application of filter_components, this time on the labelmap's true final
+    per-region extent, re-flattened with the same wt&~tc=2 / tc&~et=1 / et=3 / rc=4
+    precedence combine_region_masks itself uses. Validity of re-flattening without
+    breaking WT superset TC superset ET nesting requires all region floors to be
+    numerically equal (they are: 15.0 for all four here), since an ET component can
+    never exceed the TC component it sits inside.
+  measured_effect_on_179_validation_cases: |
+    WT: 44 fragments removed (max 11.33mm3), 0 case-level flips.
+    TC: 52 fragments removed (max 12.6mm3), 0 case-level flips.
+    ET: 62 fragments removed (max 11.33mm3), 0 case-level flips.
+    RC (shipped config only): 1 fragment removed (0.26mm3), 0 case-level flips.
+    Composite/per-region leaderboard impact: ET/TC/WT all_instance_f1 unchanged to
+    4 decimal places between 9774162 and 9774164 (both post-fix); RC moved via a
+    SEPARATE mechanism (max-seed vs mean-seed), not attributable to this fix alone
+    on the shipped config specifically. Source: rc_floor_ordering_fix.log.
+
+brain_masking:
+  source: t1c != 0
+  applied: last_step
+  rationale: GT is always intra-brain; masking can only remove false positives, never add true ones
+
+label_encoding:
+  0: background
+  1: tumor_core_minus_enhancing   # "NETC"-equivalent voxels
+  2: whole_tumor_minus_tumor_core # perilesional edema/SNFH
+  3: enhancing_tumor
+  4: resection_cavity
+
+determinism:
+  training_seed_pinned: true       # determ: True, MONAI set_determinism(seed=0) -- training only, not relevant at inference
+  inference_determinism: |
+    Sliding-window inference with a fixed model in eval mode is deterministic given
+    identical input and hardware/library versions. No test-time augmentation (tta: false
+    above) and no stochastic post-processing step. Same input -> same output across runs,
+    modulo floating-point non-associativity across different GPU/driver/cuDNN versions
+    (not measured cross-hardware in this project -- flagged as an open question, see
+    CONTAINER.md).

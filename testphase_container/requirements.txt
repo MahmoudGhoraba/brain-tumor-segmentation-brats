@@ -1,0 +1,66 @@
+# Exact pins, no ranges. Every package here is actually imported (directly or
+# transitively) by entrypoint.py or by Model/segresnet_*/scripts/segmenter.py (Auto3DSeg's
+# own algorithm-template script, reused verbatim -- see entrypoint.py's own docstring for
+# why it is not reimplemented). Verified by grep against both files' import statements,
+# 2026-07-30, in the exact environment that produced the byte-verified reproduction of
+# submission 9774164 (configs/FROZEN_TESTPHASE.yaml header).
+#
+# torch is NOT listed here -- installed separately in the Dockerfile via the official
+# PyTorch index (see Part 1's decision: torch==2.13.0+cu130 already covers sm_86 (A10G)
+# and sm_90 (H200/dev) architectures, confirmed via torch.cuda.get_arch_list() in this
+# exact environment: ['sm_75','sm_80','sm_86','sm_90','sm_100','sm_120']. Do not
+# substitute a different CUDA build "for safety" -- that would introduce an unverified
+# numerical environment where a verified one already satisfies the actual requirement.)
+
+monai==1.6.0
+nibabel==5.4.2
+packaging==26.2
+# ^ nibabel's own pkg_info.py does `from packaging.version import Version` at import
+# time (nibabel==5.4.2 declares `packaging>=20` as a hard runtime dependency, confirmed
+# via that wheel's METADATA) -- missed in the original import-everything pass because
+# every dev/verification environment so far had `packaging` present transitively (pulled
+# in by some other build-time tool), masking the gap until a container built from this
+# requirements.txt alone actually ran `import nibabel` with nothing else installed.
+# Pinned to the latest release as of this project's 2026-07-30 verification date; no
+# upper bound is imposed by nibabel itself.
+numpy==2.2.6
+scipy==1.17.1
+scikit-image==0.26.0
+scikit-learn==1.9.0
+joblib==1.5.3
+psutil==7.2.2
+PyYAML==6.0.3
+tensorboard==2.21.0
+connected-components-3d==3.29.0
+# ^ imports as `cc3d`. Found ONLY by the fresh-venv smoke test (Part 3): postproc_filters.py
+# (bundled, needed for wt_no_et_filter/rim_test_filter) transitively imports
+# brats_lesionwise.py for build_lesions(), which imports cc3d at module level. Missed in
+# the first pass of this requirements file -- exactly the gap a real import-everything
+# test is for, not a hypothetical one.
+MedPy==0.5.2
+# ^ brats_lesionwise.py also imports medpy.metric.binary.__surface_distances at module
+# level (used by HD95/NSD-adjacent code elsewhere in that file; not called by this
+# container's own code path, but the import executes regardless since it happens at
+# module load time, not lazily).
+# tensorboard is imported at module level by segmenter.py
+# (`from torch.utils.tensorboard import SummaryWriter`) even though this container never
+# writes tensorboard logs -- the import must succeed or the whole module fails to load.
+fire==0.7.1
+termcolor==3.3.0
+# ^ CRITICAL, found only by actually EXECUTING the venv smoke test (Part 3), not by
+# import-only checks: segmenter.py's own `if __name__ == "__main__":` block
+# (Model/segresnet_*/scripts/segmenter.py, ~line 2206) does
+#     fire, fire_is_imported = optional_import("fire")
+#     if fire_is_imported: fire.Fire(run_segmenter)
+#     else: run_segmenter(config_file="config/hyper_parameters.yaml")
+# Without `fire` installed, this does NOT raise an ImportError -- MONAI's optional_import
+# swallows it -- it silently falls into the `else` branch, DISCARDING every CLI arg
+# entrypoint.py passed (config_file, pretrained_ckpt_name, output_path, etc.) and instead
+# hardcodes a nonexistent relative path "config/hyper_parameters.yaml". The failure mode
+# is a FileNotFoundError that looks like a path bug in entrypoint.py, not a missing
+# dependency -- confirmed by direct reproduction: reinstalling `fire` alone (no other
+# change) fixed it. termcolor is fire's own runtime dependency.
+
+# Explicitly NOT shipped, and their absence is deliberate: the training stack
+# (torch.distributed / DDP path is imported but never exercised at single-GPU inference;
+# no additional package is needed for it beyond what torch itself provides).

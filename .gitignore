@@ -1,0 +1,18 @@
+# Sensitive / restricted data (BraTS/Synapse DUA)
+Dataset/
+configs/ucsd_patient_ids.json
+
+# Large model checkpoints (over GitHub's 100MB file limit) - decide on LFS/hosting later
+Model/*/model/model.pt
+
+# Python
+__pycache__/
+*.pyc
+
+# Local secrets / temp
+secrets/
+tmp_smoke_input/
+tmp_smoke_output/
+tmp_mi_output_A/
+tmp_mi_output_B/
+tmp_mi_gt/
